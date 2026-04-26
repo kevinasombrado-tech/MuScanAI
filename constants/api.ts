@@ -1,12 +1,31 @@
 import Constants from 'expo-constants';
 
+const DEFAULT_REMOTE_API_BASE = 'https://muscan-admin-api.onrender.com';
+
 const ENV_API_BASE = process.env.EXPO_PUBLIC_API_BASE?.trim();
+const ENV_API_FALLBACK = process.env.EXPO_PUBLIC_API_FALLBACK?.trim();
 const ENV_API_CANDIDATES = (process.env.EXPO_PUBLIC_API_CANDIDATES ?? '')
 	.split(',')
 	.map((value) => value.trim())
 	.filter(Boolean);
 
-export const API_BASE = ENV_API_BASE || 'http://127.0.0.1:8001';
+export const API_BASE = ENV_API_BASE || DEFAULT_REMOTE_API_BASE;
+
+type CandidateSource =
+	| 'persisted_override'
+	| 'env_api_base'
+	| 'env_api_fallback'
+	| 'env_api_candidates'
+	| 'default_api_base'
+	| 'derived_lan';
+
+type CandidateEntry = {
+	base: string;
+	source: CandidateSource;
+};
+
+// AsyncStorage for persisting manually-set API base across network changes
+let persistedApiBase: string | null = null;
 
 const getExpoHostUri = (): string =>
 	Constants.expoConfig?.hostUri ||
@@ -22,44 +41,75 @@ const deriveLanBase = (hostUri: string): string | null => {
 	return `http://${host}:8001`;
 };
 
-const getApiBaseCandidates = (): string[] => {
+const pushCandidate = (
+	target: CandidateEntry[],
+	value: string | null | undefined,
+	source: CandidateSource
+) => {
+	const trimmed = String(value || '').trim();
+	if (!trimmed) return;
+	target.push({ base: trimmed, source });
+};
+
+const getApiCandidateEntries = (): CandidateEntry[] => {
 	const hostUri = getExpoHostUri();
 	const lanBase = deriveLanBase(hostUri);
+	const entries: CandidateEntry[] = [];
 
-	return Array.from(
-		new Set(
-			[
-				persistedApiBase,
-				ENV_API_BASE,
-				lanBase,
-				...ENV_API_CANDIDATES,
-				API_BASE,
-				'http://192.168.1.113:8001',
-				
-			]
-				.filter((value): value is string => !!value)
-				.map((value) => value.trim())
-		)
-	);
+	pushCandidate(entries, persistedApiBase, 'persisted_override');
+	pushCandidate(entries, ENV_API_BASE, 'env_api_base');
+	pushCandidate(entries, ENV_API_FALLBACK, 'env_api_fallback');
+	for (const candidate of ENV_API_CANDIDATES) {
+		pushCandidate(entries, candidate, 'env_api_candidates');
+	}
+	pushCandidate(entries, API_BASE, 'default_api_base');
+	pushCandidate(entries, lanBase, 'derived_lan');
+
+	return entries;
+};
+
+const getApiBaseCandidates = (): string[] => {
+	return Array.from(new Set(getApiCandidateEntries().map((entry) => entry.base)));
+};
+
+const isApiDebugEnabled = typeof __DEV__ !== 'undefined' && __DEV__;
+
+const apiLog = (level: 'log' | 'warn' | 'error', ...args: unknown[]) => {
+	if (!isApiDebugEnabled) return;
+	const logger = console[level] ?? console.log;
+	logger(...args);
 };
 
 // Diagnostic export for debug/troubleshooting screens
 export const getNetworkDiagnostics = () => {
 	const hostUri = getExpoHostUri();
-	const candidates = getApiBaseCandidates();
+	const entries = getApiCandidateEntries();
+	const grouped = new Map<string, Set<CandidateSource>>();
+	for (const entry of entries) {
+		if (!grouped.has(entry.base)) {
+			grouped.set(entry.base, new Set<CandidateSource>());
+		}
+		grouped.get(entry.base)?.add(entry.source);
+	}
+	const candidateDetails = Array.from(grouped.entries()).map(([base, sources]) => ({
+		base,
+		sources: Array.from(sources),
+	}));
+	const candidates = candidateDetails.map((item) => item.base);
 	return {
 		expo_host_uri: hostUri,
 		derived_lan_base: deriveLanBase(hostUri),
+		persisted_override: persistedApiBase,
 		env_api_base: ENV_API_BASE,
+		env_api_fallback: ENV_API_FALLBACK,
 		env_api_candidates: ENV_API_CANDIDATES,
+		default_remote_api_base: DEFAULT_REMOTE_API_BASE,
 		all_candidates: candidates,
+		candidate_details: candidateDetails,
 		preferred_base: preferredBase,
 		default_timeout_ms: DEFAULT_TIMEOUT_MS,
 	};
 };
-
-// AsyncStorage for persisting manually-set API base across network changes
-let persistedApiBase: string | null = null;
 
 export const setPersistedApiBase = async (base: string | null) => {
 	persistedApiBase = base;
@@ -70,9 +120,9 @@ export const setPersistedApiBase = async (base: string | null) => {
 		} else {
 			await AsyncStorage.removeItem('api_base_override');
 		}
-		console.log(`[API] Persisted API base: ${base || '(cleared)'}`);
+		apiLog('log', `[API] Persisted API base: ${base || '(cleared)'}`);
 	} catch (error) {
-		console.warn('[API] Failed to persist API base:', error);
+		apiLog('warn', '[API] Failed to persist API base:', error);
 	}
 };
 
@@ -82,11 +132,11 @@ export const loadPersistedApiBase = async (): Promise<string | null> => {
 		const stored = await AsyncStorage.getItem('api_base_override');
 		if (stored) {
 			persistedApiBase = stored;
-			console.log(`[API] Loaded persisted API base: ${stored}`);
+			apiLog('log', `[API] Loaded persisted API base: ${stored}`);
 		}
 		return stored;
 	} catch (error) {
-		console.warn('[API] Failed to load persisted API base:', error);
+		apiLog('warn', '[API] Failed to load persisted API base:', error);
 		return null;
 	}
 };
@@ -156,8 +206,9 @@ export async function requestApi(
 	const attemptLog: Array<{ base: string; status: string; error?: string }> = [];
 	const logAttempt = (base: string, status: string, error?: string) => {
 		attemptLog.push({ base, status, error });
-		const level = status === 'success' ? 'log' : status === 'skipped' ? 'log' : 'warn';
-		console[level](
+		const level: 'log' | 'warn' = status === 'success' ? 'log' : status === 'skipped' ? 'log' : 'warn';
+		apiLog(
+			level,
 			`[API] ${status.toUpperCase()} ${base}${normalizedPath} (timeout=${timeoutMs}ms) ${error ? `- ${error}` : ''}`
 		);
 	};
@@ -181,7 +232,7 @@ export async function requestApi(
 				continue;
 			}
 
-			console.log(`[API] Resolved API base to: ${base}`);
+			apiLog('log', `[API] Resolved API base to: ${base}`);
 			return response;
 		} catch (error) {
 			lastNetworkError = error;
@@ -197,11 +248,11 @@ export async function requestApi(
 	}
 
 	if (lastHttpResponse) {
-		console.warn(`[API] All hosts exhausted. Returning last HTTP response: ${lastHttpResponse.status}`);
+		apiLog('warn', `[API] All hosts exhausted. Returning last HTTP response: ${lastHttpResponse.status}`);
 		return lastHttpResponse;
 	}
 
-	console.error('[API] Network Diagnostics:', {
+	apiLog('error', '[API] Network Diagnostics:', {
 		path: normalizedPath,
 		timeout_ms: timeoutMs,
 		candidates_tried: candidates.length,
