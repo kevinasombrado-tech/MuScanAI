@@ -33,7 +33,6 @@ type CandidateDetail = {
 
 type DiagnosticsData = {
   expo_host_uri?: string;
-  derived_lan_base?: string | null;
   persisted_override?: string | null;
   all_candidates: string[];
   candidate_details?: CandidateDetail[];
@@ -157,11 +156,6 @@ export default function NetworkDebug() {
       </View>
 
       <View style={styles.section}>
-        <Text style={styles.label}>Derived LAN Base:</Text>
-        <Text style={styles.value}>{diagnostics.derived_lan_base || '(not derived)'}</Text>
-      </View>
-
-      <View style={styles.section}>
         <Text style={styles.label}>All Candidate Hosts:</Text>
         {(diagnostics.candidate_details ?? []).length > 0
           ? diagnostics.candidate_details?.map((entry, i) => (
@@ -199,7 +193,7 @@ export default function NetworkDebug() {
         </View>
         <Text style={styles.hint}>
           If auto-detection fails, manually enter your backend URL (e.g., https://muscan-admin-api.onrender.com).
-          For the Render host, no local WiFi setup is needed.
+          The app now prefers the Render host as its permanent API base.
         </Text>
       </View>
 
@@ -263,7 +257,6 @@ export default function NetworkDebug() {
           {'\n'}
           📡 Troubleshooting:
           {'\n'}• For the permanent backend, use the Render URL: https://muscan-admin-api.onrender.com
-          {'\n'}• For local development, phone and backend must be on the same WiFi network
           {'\n'}• Check backend logs for incoming requests
           {'\n'}• If still failing, set custom API base above
         </Text>

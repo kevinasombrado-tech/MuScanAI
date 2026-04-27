@@ -41,13 +41,31 @@ const deriveLanBase = (hostUri: string): string | null => {
 	return `http://${host}:8001`;
 };
 
+const isPrivateOrLocalHost = (base: string): boolean => {
+	try {
+		const host = new URL(base).hostname.toLowerCase();
+		return (
+			host === 'localhost' ||
+			host === '127.0.0.1' ||
+			host === '::1' ||
+			host.startsWith('10.') ||
+			host.startsWith('192.168.') ||
+		/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+		);
+	} catch {
+		return false;
+	}
+};
+
 const pushCandidate = (
 	target: CandidateEntry[],
 	value: string | null | undefined,
-	source: CandidateSource
+	source: CandidateSource,
+	options: { allowLocal?: boolean } = {}
 ) => {
 	const trimmed = String(value || '').trim();
 	if (!trimmed) return;
+	if (!options.allowLocal && isPrivateOrLocalHost(trimmed)) return;
 	target.push({ base: trimmed, source });
 };
 
@@ -55,15 +73,18 @@ const getApiCandidateEntries = (): CandidateEntry[] => {
 	const hostUri = getExpoHostUri();
 	const lanBase = deriveLanBase(hostUri);
 	const entries: CandidateEntry[] = [];
+	const allowLocalCandidates = typeof __DEV__ !== 'undefined' && __DEV__;
 
-	pushCandidate(entries, persistedApiBase, 'persisted_override');
+	pushCandidate(entries, persistedApiBase, 'persisted_override', { allowLocal: allowLocalCandidates });
 	pushCandidate(entries, ENV_API_BASE, 'env_api_base');
 	pushCandidate(entries, ENV_API_FALLBACK, 'env_api_fallback');
 	for (const candidate of ENV_API_CANDIDATES) {
 		pushCandidate(entries, candidate, 'env_api_candidates');
 	}
 	pushCandidate(entries, API_BASE, 'default_api_base');
-	pushCandidate(entries, lanBase, 'derived_lan');
+	if (allowLocalCandidates) {
+		pushCandidate(entries, lanBase, 'derived_lan', { allowLocal: true });
+	}
 
 	return entries;
 };
@@ -98,7 +119,7 @@ export const getNetworkDiagnostics = () => {
 	const candidates = candidateDetails.map((item) => item.base);
 	return {
 		expo_host_uri: hostUri,
-		derived_lan_base: deriveLanBase(hostUri),
+		derived_lan_base: allowLocalCandidates ? deriveLanBase(hostUri) : null,
 		persisted_override: persistedApiBase,
 		env_api_base: ENV_API_BASE,
 		env_api_fallback: ENV_API_FALLBACK,
